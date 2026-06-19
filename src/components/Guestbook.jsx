@@ -157,32 +157,54 @@ export default function Guestbook() {
     };
   }, []);
 
-  // Load video messages (real-time from Firestore if configured, otherwise IndexedDB)
+  // Load video messages (load local IndexedDB ones, AND real-time from Firestore if configured)
   useEffect(() => {
     let unsubscribeVideos = () => {};
 
+    // 1. Fetch local IndexedDB videos first
+    loadVideoMessages().then(localMsgs => {
+      setVideoMessages(prev => {
+        const merged = [...prev];
+        localMsgs.forEach(lv => {
+          if (!merged.some(v => v.id === lv.id)) {
+            merged.push(lv);
+          }
+        });
+        return merged.sort((a, b) => b.id - a.id);
+      });
+    }).catch(err => {
+      console.error("IndexedDB load error:", err);
+    });
+
+    // 2. Fetch real-time Firestore videos if configured
     if (isFirebaseConfigured) {
       try {
         const q = query(collection(db, "videos"), orderBy("id", "desc"));
         unsubscribeVideos = onSnapshot(q, (snapshot) => {
-          const videosList = [];
+          const cloudList = [];
           snapshot.forEach((doc) => {
-            videosList.push({ ...doc.data(), docId: doc.id });
+            cloudList.push({ ...doc.data(), docId: doc.id });
           });
-          setVideoMessages(videosList);
+          
+          setVideoMessages(prev => {
+            // Keep local videos (those without docId), and merge with cloud videos
+            const localOnly = prev.filter(v => !v.docId);
+            cloudList.forEach(cv => {
+              const index = localOnly.findIndex(item => item.id === cv.id);
+              if (index > -1) {
+                localOnly[index] = cv;
+              } else {
+                localOnly.push(cv);
+              }
+            });
+            return localOnly.sort((a, b) => b.id - a.id);
+          });
         }, (error) => {
-          console.error("Firestore onSnapshot videos error:", error);
+          console.error("Firestore onSnapshot videos error (likely Storage/billing issue):", error);
         });
       } catch (err) {
         console.error("Error setting up videos real-time listener:", err);
       }
-    } else {
-      // Local fallback
-      loadVideoMessages().then(msgs => {
-        setVideoMessages(msgs);
-      }).catch(err => {
-        console.error("IndexedDB load error:", err);
-      });
     }
 
     return () => {
@@ -506,7 +528,7 @@ export default function Guestbook() {
 
     if (isFirebaseConfigured) {
       try {
-        // 1. Upload raw video webm binary to Firebase Cloud Storage
+        // 1. Try to upload raw video webm binary to Firebase Cloud Storage
         const fileRef = storageRef(storage, `guestbook_videos/${id}.webm`);
         const snapshot = await uploadBytes(fileRef, recordedBlob);
         const downloadUrl = await getDownloadURL(snapshot.ref);
@@ -524,8 +546,28 @@ export default function Guestbook() {
         await addDoc(collection(db, "videos"), newVideo);
         closeRecordingModal();
       } catch (err) {
-        console.error("Error saving video capsule to Firebase:", err);
-        alert("Failed to upload video to cloud sync. Running in local fallback mode.");
+        console.error("Error saving video capsule to Firebase Storage, falling back to local storage:", err);
+        // Fallback: save to IndexedDB locally so the user doesn't lose their recording!
+        const message = {
+          id: id,
+          name: senderName.trim(),
+          blob: recordedBlob,
+          passcode: passcodeVal,
+          date: dateStr
+        };
+        try {
+          await saveVideoMessage(message);
+          setVideoMessages(prev => {
+            const merged = prev.filter(v => v.id !== id);
+            merged.push(message);
+            return merged.sort((a, b) => b.id - a.id);
+          });
+          closeRecordingModal();
+          alert("Note: Because your Firebase Storage plan requires a billing upgrade, this video has been successfully saved locally in your browser instead! 🔒");
+        } catch (localErr) {
+          console.error("Local save failed:", localErr);
+          alert("Failed to save video both to cloud and locally.");
+        }
       } finally {
         setIsSavingVideo(false);
       }
@@ -598,28 +640,28 @@ export default function Guestbook() {
   };
 
   const deleteVideoDirectly = async (id) => {
-    if (isFirebaseConfigured) {
-      const msg = videoMessages.find(m => m.id === id);
-      if (msg && msg.docId) {
-        try {
-          // 1. Delete document from Firestore
-          await deleteDoc(doc(db, "videos", msg.docId));
+    const msg = videoMessages.find(m => m.id === id);
+    if (!msg) return;
 
-          // 2. Delete file from Storage
-          if (msg.storagePath) {
-            const fileRef = storageRef(storage, msg.storagePath);
-            await deleteObject(fileRef);
-          }
-        } catch (err) {
-          console.error("Error deleting video from Firebase:", err);
-          alert("Failed to delete video message from cloud storage.");
+    if (msg.docId && isFirebaseConfigured) {
+      try {
+        // 1. Delete document from Firestore
+        await deleteDoc(doc(db, "videos", msg.docId));
+
+        // 2. Delete file from Storage
+        if (msg.storagePath) {
+          const fileRef = storageRef(storage, msg.storagePath);
+          await deleteObject(fileRef);
         }
+      } catch (err) {
+        console.error("Error deleting video from Firebase:", err);
+        alert("Failed to delete video message from cloud storage.");
       }
     } else {
+      // Local or fallback deletion
       try {
         await deleteVideoMessage(id);
-        const msgs = await loadVideoMessages();
-        setVideoMessages(msgs);
+        setVideoMessages(prev => prev.filter(v => v.id !== id));
       } catch (err) {
         console.error("Error deleting video capsule from IndexedDB:", err);
       }
