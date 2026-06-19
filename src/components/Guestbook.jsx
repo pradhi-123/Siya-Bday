@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, Heart, Star, User, MessageSquare, Video, Lock, Play, Square, RefreshCw, Trash2, X, Eye, EyeOff, Pencil } from 'lucide-react';
 
+// Firebase integrations
+import { db, storage, isFirebaseConfigured } from '../firebase';
+import { collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } from 'firebase/firestore';
+import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+
 // IndexedDB Helper functions for storage of large raw video blobs
 const DB_NAME = "tribute_videos_db";
 const DB_VERSION = 1;
@@ -98,6 +103,7 @@ export default function Guestbook() {
   const [senderName, setSenderName] = useState("");
   const [videoPasscode, setVideoPasscode] = useState("");
   const [showPasscode, setShowPasscode] = useState(false);
+  const [isSavingVideo, setIsSavingVideo] = useState(false);
 
   // Refs for HTML5 Video tags and recording control
   const livePreviewRef = useRef(null);
@@ -115,25 +121,73 @@ export default function Guestbook() {
 
   const avatars = ["🧸", "🌸", "⭐", "🦋", "🍪", "🐱", "🎒", "✨"];
 
-  // Load sticky notes from localStorage and videos from IndexedDB
+  // Load sticky notes (real-time from Firestore if configured, otherwise localStorage)
   useEffect(() => {
-    // 1. Sticky Notes (Empty by default + filter out old placeholders)
-    const saved = localStorage.getItem("tribute_guestbook");
-    let initialNotes = [];
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // Remove placeholder notes (id: 1 and id: 2) from existing local storages
-      initialNotes = parsed.filter(msg => msg.id !== 1 && msg.id !== 2);
-      localStorage.setItem("tribute_guestbook", JSON.stringify(initialNotes));
-    }
-    setMessages(initialNotes);
+    let unsubscribeNotes = () => {};
 
-    // 2. Videos from IndexedDB
-    loadVideoMessages().then(msgs => {
-      setVideoMessages(msgs);
-    }).catch(err => {
-      console.error("IndexedDB load error:", err);
-    });
+    if (isFirebaseConfigured) {
+      try {
+        const q = query(collection(db, "notes"), orderBy("id", "desc"));
+        unsubscribeNotes = onSnapshot(q, (snapshot) => {
+          const notesList = [];
+          snapshot.forEach((doc) => {
+            notesList.push({ ...doc.data(), docId: doc.id });
+          });
+          setMessages(notesList);
+        }, (error) => {
+          console.error("Firestore onSnapshot notes error:", error);
+        });
+      } catch (err) {
+        console.error("Error setting up notes real-time listener:", err);
+      }
+    } else {
+      // Local fallback
+      const saved = localStorage.getItem("tribute_guestbook");
+      let initialNotes = [];
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        initialNotes = parsed.filter(msg => msg.id !== 1 && msg.id !== 2);
+        localStorage.setItem("tribute_guestbook", JSON.stringify(initialNotes));
+      }
+      setMessages(initialNotes);
+    }
+
+    return () => {
+      unsubscribeNotes();
+    };
+  }, []);
+
+  // Load video messages (real-time from Firestore if configured, otherwise IndexedDB)
+  useEffect(() => {
+    let unsubscribeVideos = () => {};
+
+    if (isFirebaseConfigured) {
+      try {
+        const q = query(collection(db, "videos"), orderBy("id", "desc"));
+        unsubscribeVideos = onSnapshot(q, (snapshot) => {
+          const videosList = [];
+          snapshot.forEach((doc) => {
+            videosList.push({ ...doc.data(), docId: doc.id });
+          });
+          setVideoMessages(videosList);
+        }, (error) => {
+          console.error("Firestore onSnapshot videos error:", error);
+        });
+      } catch (err) {
+        console.error("Error setting up videos real-time listener:", err);
+      }
+    } else {
+      // Local fallback
+      loadVideoMessages().then(msgs => {
+        setVideoMessages(msgs);
+      }).catch(err => {
+        console.error("IndexedDB load error:", err);
+      });
+    }
+
+    return () => {
+      unsubscribeVideos();
+    };
   }, []);
 
   // Cleanup camera stream on unmount
@@ -154,7 +208,7 @@ export default function Guestbook() {
     localStorage.setItem("tribute_guestbook", JSON.stringify(newMsgs));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!name.trim() || !content.trim()) return;
 
@@ -171,26 +225,51 @@ export default function Guestbook() {
       passcode: notePasscode.trim() || null
     };
 
-    const updated = [newMsg, ...messages];
-    saveMessages(updated);
+    if (isFirebaseConfigured) {
+      try {
+        await addDoc(collection(db, "notes"), newMsg);
+      } catch (err) {
+        console.error("Error adding note to Firestore:", err);
+        alert("Failed to pin note to cloud storage. Running in offline/fallback mode.");
+      }
+    } else {
+      const updated = [newMsg, ...messages];
+      saveMessages(updated);
+    }
+
     setName("");
     setContent("");
     setNotePasscode("");
     setShowNotePasscode(false);
   };
 
-  const handleReact = (id, type) => {
-    const updated = messages.map(msg => {
-      if (msg.id === id) {
-        return {
-          ...msg,
-          hearts: type === 'heart' ? msg.hearts + 1 : msg.hearts,
-          stars: type === 'star' ? msg.stars + 1 : msg.stars
-        };
+  const handleReact = async (id, type) => {
+    if (isFirebaseConfigured) {
+      const msg = messages.find(m => m.id === id);
+      if (msg && msg.docId) {
+        try {
+          const noteRef = doc(db, "notes", msg.docId);
+          await updateDoc(noteRef, {
+            hearts: type === 'heart' ? (msg.hearts || 0) + 1 : msg.hearts || 0,
+            stars: type === 'star' ? (msg.stars || 0) + 1 : msg.stars || 0
+          });
+        } catch (err) {
+          console.error("Error updating note reaction in Firestore:", err);
+        }
       }
-      return msg;
-    });
-    saveMessages(updated);
+    } else {
+      const updated = messages.map(msg => {
+        if (msg.id === id) {
+          return {
+            ...msg,
+            hearts: type === 'heart' ? msg.hearts + 1 : msg.hearts,
+            stars: type === 'star' ? msg.stars + 1 : msg.stars
+          };
+        }
+        return msg;
+      });
+      saveMessages(updated);
+    }
   };
 
   // Delete note
@@ -209,9 +288,21 @@ export default function Guestbook() {
     }
   };
 
-  const deleteNoteDirectly = (id) => {
-    const updated = messages.filter(msg => msg.id !== id);
-    saveMessages(updated);
+  const deleteNoteDirectly = async (id) => {
+    if (isFirebaseConfigured) {
+      const msg = messages.find(m => m.id === id);
+      if (msg && msg.docId) {
+        try {
+          await deleteDoc(doc(db, "notes", msg.docId));
+        } catch (err) {
+          console.error("Error deleting note from Firestore:", err);
+          alert("Failed to delete note from cloud storage.");
+        }
+      }
+    } else {
+      const updated = messages.filter(msg => msg.id !== id);
+      saveMessages(updated);
+    }
   };
 
   // Edit note
@@ -237,24 +328,41 @@ export default function Guestbook() {
     setIsEditNoteModalOpen(true);
   };
 
-  const handleSaveEditNote = (e) => {
+  const handleSaveEditNote = async (e) => {
     e.preventDefault();
     if (!editingNote) return;
 
-    const updated = messages.map(msg => {
-      if (msg.id === editingNote.id) {
-        return {
-          ...msg,
-          name: editName.trim(),
-          content: editContent.trim(),
-          avatar: editAvatar,
-          color: editColor
-        };
+    if (isFirebaseConfigured) {
+      if (editingNote.docId) {
+        try {
+          const noteRef = doc(db, "notes", editingNote.docId);
+          await updateDoc(noteRef, {
+            name: editName.trim(),
+            content: editContent.trim(),
+            avatar: editAvatar,
+            color: editColor
+          });
+        } catch (err) {
+          console.error("Error editing note in Firestore:", err);
+          alert("Failed to save changes to cloud storage.");
+        }
       }
-      return msg;
-    });
+    } else {
+      const updated = messages.map(msg => {
+        if (msg.id === editingNote.id) {
+          return {
+            ...msg,
+            name: editName.trim(),
+            content: editContent.trim(),
+            avatar: editAvatar,
+            color: editColor
+          };
+        }
+        return msg;
+      });
+      saveMessages(updated);
+    }
 
-    saveMessages(updated);
     setIsEditNoteModalOpen(false);
     setEditingNote(null);
   };
@@ -391,21 +499,55 @@ export default function Guestbook() {
   const handleSaveVideo = async () => {
     if (!senderName.trim() || !recordedBlob) return;
     
-    const message = {
-      id: Date.now(),
-      name: senderName.trim(),
-      blob: recordedBlob,
-      passcode: videoPasscode.trim() || null,
-      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    };
+    setIsSavingVideo(true);
+    const id = Date.now();
+    const dateStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const passcodeVal = videoPasscode.trim() || null;
 
-    try {
-      await saveVideoMessage(message);
-      const msgs = await loadVideoMessages();
-      setVideoMessages(msgs);
-      closeRecordingModal();
-    } catch (err) {
-      console.error("Error saving video capsule:", err);
+    if (isFirebaseConfigured) {
+      try {
+        // 1. Upload raw video webm binary to Firebase Cloud Storage
+        const fileRef = storageRef(storage, `guestbook_videos/${id}.webm`);
+        const snapshot = await uploadBytes(fileRef, recordedBlob);
+        const downloadUrl = await getDownloadURL(snapshot.ref);
+
+        // 2. Add video document metadata to Firestore
+        const newVideo = {
+          id: id,
+          name: senderName.trim(),
+          url: downloadUrl,
+          storagePath: `guestbook_videos/${id}.webm`,
+          passcode: passcodeVal,
+          date: dateStr
+        };
+
+        await addDoc(collection(db, "videos"), newVideo);
+        closeRecordingModal();
+      } catch (err) {
+        console.error("Error saving video capsule to Firebase:", err);
+        alert("Failed to upload video to cloud sync. Running in local fallback mode.");
+      } finally {
+        setIsSavingVideo(false);
+      }
+    } else {
+      const message = {
+        id: id,
+        name: senderName.trim(),
+        blob: recordedBlob,
+        passcode: passcodeVal,
+        date: dateStr
+      };
+
+      try {
+        await saveVideoMessage(message);
+        const msgs = await loadVideoMessages();
+        setVideoMessages(msgs);
+        closeRecordingModal();
+      } catch (err) {
+        console.error("Error saving video capsule to IndexedDB:", err);
+      } finally {
+        setIsSavingVideo(false);
+      }
     }
   };
 
@@ -423,7 +565,7 @@ export default function Guestbook() {
   };
 
   const playVideoDirectly = (msg) => {
-    const url = URL.createObjectURL(msg.blob);
+    const url = msg.url ? msg.url : URL.createObjectURL(msg.blob);
     setActiveVideoUrl(url);
     setActiveVideo(msg);
     setIsVideoPlayerOpen(true);
@@ -432,7 +574,9 @@ export default function Guestbook() {
   const closeVideoPlayer = () => {
     setIsVideoPlayerOpen(false);
     if (activeVideoUrl) {
-      URL.revokeObjectURL(activeVideoUrl);
+      if (activeVideoUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(activeVideoUrl);
+      }
       setActiveVideoUrl("");
     }
     setActiveVideo(null);
@@ -454,12 +598,31 @@ export default function Guestbook() {
   };
 
   const deleteVideoDirectly = async (id) => {
-    try {
-      await deleteVideoMessage(id);
-      const msgs = await loadVideoMessages();
-      setVideoMessages(msgs);
-    } catch (err) {
-      console.error("Error deleting video capsule:", err);
+    if (isFirebaseConfigured) {
+      const msg = videoMessages.find(m => m.id === id);
+      if (msg && msg.docId) {
+        try {
+          // 1. Delete document from Firestore
+          await deleteDoc(doc(db, "videos", msg.docId));
+
+          // 2. Delete file from Storage
+          if (msg.storagePath) {
+            const fileRef = storageRef(storage, msg.storagePath);
+            await deleteObject(fileRef);
+          }
+        } catch (err) {
+          console.error("Error deleting video from Firebase:", err);
+          alert("Failed to delete video message from cloud storage.");
+        }
+      }
+    } else {
+      try {
+        await deleteVideoMessage(id);
+        const msgs = await loadVideoMessages();
+        setVideoMessages(msgs);
+      } catch (err) {
+        console.error("Error deleting video capsule from IndexedDB:", err);
+      }
     }
   };
 
@@ -486,9 +649,48 @@ export default function Guestbook() {
   return (
     <div className="section-container" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
       <h2 className="section-title serif-title">Guestbook Messages 📖</h2>
-      <p style={{ textAlign: 'center', color: 'var(--text-secondary)', marginBottom: '40px', maxWidth: '600px', marginInline: 'auto' }}>
+      <p style={{ textAlign: 'center', color: 'var(--text-secondary)', marginBottom: '20px', maxWidth: '600px', marginInline: 'auto' }}>
         Leave a warm message, wish, or inside joke on the sticky note board! Let's cover her dashboard with kindness.
       </p>
+
+      {/* Cloud Sync Status Badge */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '30px' }}>
+        {isFirebaseConfigured ? (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            background: 'rgba(16, 185, 129, 0.1)',
+            border: '1px solid rgba(16, 185, 129, 0.25)',
+            color: 'var(--success-color)',
+            padding: '8px 16px',
+            borderRadius: '20px',
+            fontSize: '0.85rem',
+            fontWeight: 500,
+            boxShadow: '0 4px 12px rgba(16, 185, 129, 0.05)'
+          }}>
+            <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: 'var(--success-color)', animation: 'recordingBlink 1.5s infinite alternate' }} />
+            Cloud Sync Active ☁️ (Synced Across Devices)
+          </div>
+        ) : (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            background: 'rgba(255, 255, 255, 0.03)',
+            border: '1px solid var(--glass-border)',
+            color: 'var(--text-muted)',
+            padding: '8px 16px',
+            borderRadius: '20px',
+            fontSize: '0.85rem',
+            fontWeight: 500,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.05)'
+          }}>
+            <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#94a3b8' }} />
+            Local Sandbox Mode 🔒 (Saved to this Browser)
+          </div>
+        )}
+      </div>
 
       {/* STICKY NOTES INTERFACE */}
       <div style={{
@@ -1163,16 +1365,32 @@ export default function Guestbook() {
 
                 <button 
                   onClick={handleSaveVideo} 
-                  disabled={!senderName.trim()} 
+                  disabled={!senderName.trim() || isSavingVideo} 
                   className="btn-primary" 
                   style={{ 
                     justifyContent: 'center', 
                     marginTop: '6px', 
-                    opacity: senderName.trim() ? 1 : 0.5,
-                    cursor: senderName.trim() ? 'pointer' : 'not-allowed'
+                    opacity: (senderName.trim() && !isSavingVideo) ? 1 : 0.5,
+                    cursor: (senderName.trim() && !isSavingVideo) ? 'pointer' : 'not-allowed',
+                    gap: '8px'
                   }}
                 >
-                  Save Video Capsule 📥
+                  {isSavingVideo ? (
+                    <>
+                      <span className="spinner" style={{
+                        display: 'inline-block',
+                        width: '14px',
+                        height: '14px',
+                        border: '2px solid rgba(255,255,255,0.3)',
+                        borderRadius: '50%',
+                        borderTopColor: '#fff',
+                        animation: 'spin 1s ease-in-out infinite'
+                      }} />
+                      Uploading to Cloud...
+                    </>
+                  ) : (
+                    "Save Video Capsule 📥"
+                  )}
                 </button>
               </div>
             )}
@@ -1600,6 +1818,9 @@ export default function Guestbook() {
         @keyframes recordingBlink {
           0% { opacity: 0.6; }
           100% { opacity: 1; }
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
         }
       `}</style>
     </div>
