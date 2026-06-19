@@ -231,6 +231,7 @@ export default function App() {
             {prevTab && (
               <button
                 onClick={() => handleTabChange(prevTab.id)}
+                className="glass-card nav-btn"
                 style={{
                   flex: 1,
                   padding: '12px 20px',
@@ -257,12 +258,14 @@ export default function App() {
                   e.currentTarget.style.color = 'var(--text-secondary)';
                 }}
               >
-                ← Previous: {prevTab.label}
+                ← <span className="nav-btn-text-full">Previous: {prevTab.label}</span>
+                  <span className="nav-btn-text-short" style={{ display: 'none' }}>Prev</span>
               </button>
             )}
             {nextTab && (
               <button
                 onClick={() => handleTabChange(nextTab.id)}
+                className="glass-card nav-btn"
                 style={{
                   flex: 1,
                   padding: '12px 20px',
@@ -290,7 +293,8 @@ export default function App() {
                   e.currentTarget.style.boxShadow = '0 0 15px rgba(168, 85, 247, 0.15)';
                 }}
               >
-                Next: {nextTab.label} →
+                <span className="nav-btn-text-full">Next: {nextTab.label}</span>
+                <span className="nav-btn-text-short" style={{ display: 'none' }}>Next</span> →
               </button>
             )}
           </div>
@@ -313,6 +317,18 @@ export default function App() {
         @keyframes fadeEnter {
           from { opacity: 0; transform: translateY(15px); }
           to { opacity: 1; transform: translateY(0); }
+        }
+        @media (max-width: 480px) {
+          .nav-btn-text-full {
+            display: none !important;
+          }
+          .nav-btn-text-short {
+            display: inline !important;
+          }
+          .nav-btn {
+            padding: 10px 16px !important;
+            font-size: 0.8rem !important;
+          }
         }
       `}</style>
     </>
