@@ -528,9 +528,13 @@ export default function Guestbook() {
 
     if (isFirebaseConfigured) {
       try {
-        // 1. Try to upload raw video webm binary to Firebase Cloud Storage
+        // 1. Try to upload raw video webm binary to Firebase Cloud Storage with a 4-second timeout
         const fileRef = storageRef(storage, `guestbook_videos/${id}.webm`);
-        const snapshot = await uploadBytes(fileRef, recordedBlob);
+        const uploadPromise = uploadBytes(fileRef, recordedBlob);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Storage upload timed out")), 4000)
+        );
+        const snapshot = await Promise.race([uploadPromise, timeoutPromise]);
         const downloadUrl = await getDownloadURL(snapshot.ref);
 
         // 2. Add video document metadata to Firestore
