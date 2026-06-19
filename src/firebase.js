@@ -5,12 +5,13 @@ import { getStorage } from "firebase/storage";
 // Paste your Firebase Config object here
 // You can get this from Firebase Console -> Project Settings -> General -> Web Apps
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_AUTH_DOMAIN",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_STORAGE_BUCKET",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyDR3eS7wi1IZJ1o_-kXB0OyveE6zlISIfs",
+  authDomain: "siya-bday.firebaseapp.com",
+  projectId: "siya-bday",
+  storageBucket: "siya-bday.firebasestorage.app",
+  messagingSenderId: "45908746711",
+  appId: "1:45908746711:web:a295fc36fc03f80b464872",
+  measurementId: "G-C09ZRF9D40"
 };
 
 // Auto-check if user has replaced the default configuration template
